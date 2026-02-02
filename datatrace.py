@@ -55,7 +55,7 @@ def get_dataset(name, description="", tags=None, auto_create=True):
         print(f"❌ Failed to get dataset {name}: {e}")
         return None
 
-def log(inputs, op_name, output_name, description=None, output_tags=None):
+def log(inputs, op_name, output_name, description=None, output_tags=None, actor=None, run_id=None, source="sdk"):
     """
     核心操作：记录一次数据变换 (Transformation)
     类似 swanlab.log，但在 DataTrace 中意味着“生成了新数据”
@@ -78,7 +78,15 @@ def log(inputs, op_name, output_name, description=None, output_tags=None):
         "input_ids": input_ids,
         "operation": op_name,
         "description": description or f"Executed via SDK script",
-        "output_suffix": "" # 这里我们由 output_name 决定
+        "actor": (actor or CONFIG.get("USER") or "anonymous"),
+        "source": source,
+        "run_id": run_id,
+        # 与后端 /transform 对齐：明确指定输出数据集名称（支持强制命名）
+        "outputs": [{
+            "name": output_name,
+            "description": (description or "").strip()
+        }],
+        "output_suffix": "" # 兼容旧字段：后端目前不依赖它命名
     }
 
     # 注意：目前的 API 是自动生成 output name 的，
@@ -91,7 +99,9 @@ def log(inputs, op_name, output_name, description=None, output_tags=None):
         res = requests.post(f"{CONFIG['API_URL']}/transform/", json=payload)
         res.raise_for_status()
         data = res.json()
-        out_ds = data['output_dataset']
+        out_ds = (data.get('output_dataset') or (data.get('output_datasets') or [None])[0])
+        if not out_ds:
+            raise RuntimeError(f"Unexpected API response: {data}")
         
         print(f"🚀 Operation '{op_name}' logged.")
         print(f"   └── New Dataset: {out_ds['name']} (ID: {out_ds['id']})")
@@ -125,3 +135,121 @@ def trace(op_name, output_name_suffix="_processed"):
             return result
         return wrapper
     return decorator
+
+def get_records(start=None, end=None, op_types=None, q=None, actor=None, source=None, run_id=None, dataset_id=None, direction="both", depth=2, limit=50, offset=0):
+    params = {"limit": int(limit or 50), "offset": int(offset or 0)}
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    if op_types:
+        params["op_types"] = ",".join(op_types) if isinstance(op_types, (list, tuple, set)) else str(op_types)
+    if q:
+        params["q"] = q
+    if actor:
+        params["actor"] = actor
+    if source:
+        params["source"] = source
+    if run_id:
+        params["run_id"] = run_id
+    if dataset_id:
+        params["dataset_id"] = dataset_id.id if isinstance(dataset_id, Dataset) else str(dataset_id)
+        params["direction"] = direction
+        params["depth"] = int(depth or 2)
+    res = requests.get(f"{CONFIG['API_URL']}/records", params=params)
+    res.raise_for_status()
+    return res.json()
+
+def get_operations(start=None, end=None, q=None, actor=None, source=None, run_id=None, dataset_id=None, direction="both", depth=2):
+    params = {}
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    if q:
+        params["q"] = q
+    if actor:
+        params["actor"] = actor
+    if source:
+        params["source"] = source
+    if run_id:
+        params["run_id"] = run_id
+    if dataset_id:
+        params["dataset_id"] = dataset_id.id if isinstance(dataset_id, Dataset) else str(dataset_id)
+        params["direction"] = direction
+        params["depth"] = int(depth or 2)
+    res = requests.get(f"{CONFIG['API_URL']}/operations", params=params)
+    res.raise_for_status()
+    return res.json()
+
+def get_lineage(dataset_id, direction="both", depth=2, start=None, end=None, op_types=None, q=None):
+    ds_id = dataset_id.id if isinstance(dataset_id, Dataset) else str(dataset_id)
+    params = {"direction": direction, "depth": int(depth or 2)}
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    if op_types:
+        params["op_types"] = ",".join(op_types) if isinstance(op_types, (list, tuple, set)) else str(op_types)
+    if q:
+        params["q"] = q
+    res = requests.get(f"{CONFIG['API_URL']}/lineage/{ds_id}", params=params)
+    res.raise_for_status()
+    return res.json()
+
+def get_report(dataset_id, direction="both", depth=2, start=None, end=None, op_types=None, q=None, actor=None, source=None, run_id=None):
+    ds_id = dataset_id.id if isinstance(dataset_id, Dataset) else str(dataset_id)
+    params = {"direction": direction, "depth": int(depth or 2)}
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    if op_types:
+        params["op_types"] = ",".join(op_types) if isinstance(op_types, (list, tuple, set)) else str(op_types)
+    if q:
+        params["q"] = q
+    if actor:
+        params["actor"] = actor
+    if source:
+        params["source"] = source
+    if run_id:
+        params["run_id"] = run_id
+    res = requests.get(f"{CONFIG['API_URL']}/report/{ds_id}", params=params)
+    res.raise_for_status()
+    return res.text
+
+def get_timeseries(dataset_id, start=None, end=None, metric=None, limit=1000):
+    ds_id = dataset_id.id if isinstance(dataset_id, Dataset) else str(dataset_id)
+    params = {"limit": int(limit or 1000)}
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    if metric:
+        params["metric"] = metric
+    res = requests.get(f"{CONFIG['API_URL']}/timeseries/{ds_id}", params=params)
+    res.raise_for_status()
+    return res.json()
+
+def add_timeseries(dataset_id, points, metric="value"):
+    ds_id = dataset_id.id if isinstance(dataset_id, Dataset) else str(dataset_id)
+    payload = {"points": [{"timestamp": p["timestamp"], "value": p["value"], "metric": metric} for p in points]}
+    res = requests.post(f"{CONFIG['API_URL']}/timeseries/{ds_id}", json=payload)
+    res.raise_for_status()
+    return res.json()
+
+def generate_timeseries(dataset_id, periods=60, freq="daily", amplitude=10.0, noise=1.0, trend=0.05, metric="value", start=None):
+    ds_id = dataset_id.id if isinstance(dataset_id, Dataset) else str(dataset_id)
+    params = {
+        "periods": int(periods),
+        "freq": freq,
+        "amplitude": float(amplitude),
+        "noise": float(noise),
+        "trend": float(trend),
+        "metric": metric,
+    }
+    if start:
+        params["start"] = start
+    res = requests.post(f"{CONFIG['API_URL']}/timeseries/{ds_id}/generate", params=params)
+    res.raise_for_status()
+    return res.json()

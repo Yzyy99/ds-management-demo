@@ -1,0 +1,8 @@
+streamlit
+fastapi
+uvicorn[standard]
+pydantic
+click
+requests
+pandas
+graphviz
